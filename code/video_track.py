@@ -170,7 +170,7 @@ def constrain_ellipse(new_ellipse, prev_ellipse, max_center_drift=0.3, max_size_
 # ========== 主程序 ==========
 
 def main():
-    video_path = 'video/video_part1.mp4'
+    video_path = 'video/video_0000.avi'
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"无法打开视频: {video_path}")
@@ -187,7 +187,6 @@ def main():
     h, w = frame.shape[:2]
     w_left = w // 2
     left_frame = frame[:, :w_left]
-
     # ---- 第一帧标定 ----
     print("\n请在第一帧的椭圆边缘点击至少 5 个点，然后按 Enter 拟合。")
     initial_ellipse = mark_ellipse_on_frame(left_frame)
@@ -223,7 +222,6 @@ def main():
         frame_idx += 1
         left_half = frame[:, :w_left].copy()
         gray = cv2.cvtColor(left_half, cv2.COLOR_BGR2GRAY)
-
         (p_cx, p_cy), (p_a, p_b), p_angle = prev_ellipse
         ellipse_size = np.sqrt(p_a * p_b)
 
