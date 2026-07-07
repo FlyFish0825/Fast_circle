@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>极点与极平面的绝对平行 (画面二)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; color: #eee; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #info { position: absolute; top: 15px; width: 100%; text-align: center; pointer-events: none; z-index: 10; }
+        h2 { margin: 0; padding: 0; font-weight: 400; letter-spacing: 2px; }
+        .panel { position: absolute; bottom: 20px; left: 20px; background: rgba(30, 30, 30, 0.85); padding: 20px; border-radius: 12px; border: 1px solid #444; max-width: 350px; backdrop-filter: blur(5px); box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        .legend-item { display: flex; align-items: center; margin-bottom: 8px; font-size: 14px; }
+        .color-box { width: 16px; height: 16px; border-radius: 4px; margin-right: 10px; }
+        button { margin-top: 15px; background: #3a3a3a; color: #fff; border: 1px solid #666; padding: 8px 15px; cursor: pointer; border-radius: 6px; width: 100%; transition: 0.2s; }
+        button:hover { background: #555; }
+    </style>
+</head>
+<body>
+    <div id="info"><h2>极点与极平面的绝对平行关系</h2></div>
+    
+    <div class="panel">
+        <div style="margin-bottom: 15px; font-size: 15px; line-height: 1.5;">
+            <b>场景解析 (画面二)：</b>内部极点 P₀ 产生了一个完全平行于截面的极平面。
+        </div>
+        
+        <div class="legend-item">
+            <div class="color-box" style="background: #ffaa00; opacity: 0.3; border: 1px solid #ffaa00;"></div>
+            <span>半透明圆锥体 (Apex 位于原点)</span>
+        </div>
+        <div class="legend-item">
+            <div class="color-box" style="background: #ff3333;"></div>
+            <span>极点 P₀ (截面的几何中心)</span>
+        </div>
+        <div class="legend-item">
+            <div class="color-box" style="background: #0088ff; opacity: 0.5;"></div>
+            <span>截面平面 π (包含目标空间圆/椭圆)</span>
+        </div>
+        <div class="legend-item">
+            <div class="color-box" style="background: #00ff66; opacity: 0.5;"></div>
+            <span>极平面 (与 π 绝对平行，交于顶点)</span>
+        </div>
+        
+        <button id="toggleBtn">显示/隐藏 海胆割线</button>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // 1. 基础场景设置
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(15, 5, 20);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, -3, 0);
+
+        // 光源
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(10, 20, 10);
+        scene.add(dirLight);
+
+        // 2. 数学参数定义 (基于 x^2 + z^2 = y^2)
+        // 截面方程: y = 0.5z - 2
+        const p0 = new THREE.Vector3(0, -8/3, -4/3); // 中心极点坐标
+        const planeNormal = new THREE.Vector3(0, 1, -0.5).normalize(); // 平面法向量
+
+        // 3. 创建几何体
+        // 3.1 圆锥体 (顶点在原点，开口向下)
+        const coneHeight = 12;
+        const coneRadius = 12; // 确保 45度开角满足方程
+        const coneGeo = new THREE.ConeGeometry(coneRadius, coneHeight, 64, 1, true);
+        coneGeo.translate(0, -coneHeight/2, 0); 
+        const coneMat = new THREE.MeshPhysicalMaterial({ 
+            color: 0xffaa00, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false 
+        });
+        const coneMesh = new THREE.Mesh(coneGeo, coneMat);
+        scene.add(coneMesh);
+
+        // 3.2 截面边界 (目标空间空间圆/椭圆)
+        const curve = new THREE.Curve();
+        curve.getPoint = function (t, optionalTarget = new THREE.Vector3()) {
+            const theta = t * Math.PI * 2;
+            const x = (4/Math.sqrt(3)) * Math.cos(theta); // 半长轴
+            const z = -4/3 + (8/3) * Math.sin(theta);     // 半短轴 + 偏移
+            const y = 0.5 * z - 2;                        // 贴合平面方程
+            return optionalTarget.set(x, y, z);
+        };
+        const ellipsePts = curve.getPoints(100);
+        const ellipseGeo = new THREE.BufferGeometry().setFromPoints(ellipsePts);
+        const ellipseMat = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 2 });
+        scene.add(new THREE.Line(ellipseGeo, ellipseMat));
+
+        // 3.3 极点 P0
+        const sphereGeo = new THREE.SphereGeometry(0.2, 32, 32);
+        const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff3333 });
+        const sphereMesh = new THREE.Mesh(sphereGeo, sphereMat);
+        sphereMesh.position.copy(p0);
+        scene.add(sphereMesh);
+
+        // 3.4 截平面 π (包裹椭圆)
+        const planeGeo = new THREE.PlaneGeometry(16, 16);
+        const planeMatPi = new THREE.MeshPhysicalMaterial({ 
+            color: 0x0088ff, transparent: true, opacity: 0.4, side: THREE.DoubleSide 
+        });
+        const planePiMesh = new THREE.Mesh(planeGeo, planeMatPi);
+        planePiMesh.position.copy(p0);
+        planePiMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1), planeNormal);
+        scene.add(planePiMesh);
+
+        // 3.5 极平面 (平行于π，根据数学推导必定交于圆锥顶点)
+        const planeMatPolar = new THREE.MeshPhysicalMaterial({ 
+            color: 0x00ff66, transparent: true, opacity: 0.35, side: THREE.DoubleSide 
+        });
+        const planePolarMesh = new THREE.Mesh(planeGeo, planeMatPolar);
+        planePolarMesh.position.set(0, 0, 0); // 顶点
+        planePolarMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1), planeNormal);
+        scene.add(planePolarMesh);
+
+        // 3.6 海胆割线 (穿透圆锥壁)
+        const secantsGroup = new THREE.Group();
+        for(let i=0; i<6; i++) {
+            const theta = (i / 6) * Math.PI;
+            const pt1 = curve.getPoint(theta / (Math.PI*2));
+            
+            // 从 P0 向外两端延伸，模拟穿透
+            const dir = new THREE.Vector3().subVectors(pt1, p0).normalize();
+            const pStart = new THREE.Vector3().copy(p0).addScaledVector(dir, 10);
+            const pEnd = new THREE.Vector3().copy(p0).addScaledVector(dir, -10);
+            
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([pStart, pEnd]);
+            const lineMat = new THREE.LineBasicMaterial({ color: 0xff4444, transparent: true, opacity: 0.8 });
+            secantsGroup.add(new THREE.Line(lineGeo, lineMat));
+        }
+        secantsGroup.visible = false;
+        scene.add(secantsGroup);
+
+        // 4. 辅助线 (坐标轴)
+        const axesHelper = new THREE.AxesHelper(5);
+        scene.add(axesHelper);
+
+        // 5. 交互逻辑
+        document.getElementById('toggleBtn').addEventListener('click', () => {
+            secantsGroup.visible = !secantsGroup.visible;
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // 6. 渲染循环
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
