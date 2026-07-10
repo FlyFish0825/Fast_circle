@@ -1,1 +1,4 @@
 video
+.vscode
+*.avi
+*.mp4
