@@ -3,6 +3,82 @@ import numpy as np
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import time
+from StereoParams import ours_params
+
+
+
+
+def ellipse_to_conic(ellipse):
+    """
+    OpenCV fitEllipse 椭圆参数 -> 像素坐标下的椭圆矩阵 C_img
+
+    ellipse = ((cx, cy), (width, height), angle_deg)
+
+    返回 C_img，使得：
+        [u, v, 1]^T C_img [u, v, 1] = 0
+    """
+    (cx, cy), (width, height), angle_deg = ellipse
+
+    # fitEllipse 返回的是完整轴长，因此除以 2
+    a = width / 2.0
+    b = height / 2.0
+
+    if a <= 1e-9 or b <= 1e-9:
+        raise ValueError("椭圆半轴太小，无法构造椭圆矩阵")
+
+    theta = np.deg2rad(angle_deg)
+
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+
+    R2 = np.array([
+        [cos_t, -sin_t],
+        [sin_t,  cos_t]
+    ], dtype=np.float64)
+
+    D = np.diag([
+        1.0 / (a * a),
+        1.0 / (b * b)
+    ])
+
+    A = R2 @ D @ R2.T
+
+    c = np.array([[cx], [cy]], dtype=np.float64)
+
+    C_img = np.zeros((3, 3), dtype=np.float64)
+    C_img[:2, :2] = A
+    C_img[:2, 2:3] = -A @ c
+    C_img[2:3, :2] = (-A @ c).T
+    C_img[2, 2] = float(c.T @ A @ c - 1.0)
+
+    C_img = 0.5 * (C_img + C_img.T)
+
+    return C_img
+
+
+def conic_to_Q(C_img, K):
+    """
+    像素椭圆矩阵 C_img -> 归一化相机坐标下的 Q
+
+    公式：
+        Q = K.T @ C_img @ K
+    """
+    Q = K.T @ C_img @ K
+
+    # 保证对称
+    Q = 0.5 * (Q + Q.T)
+
+    # 齐次矩阵尺度归一化
+    norm = np.linalg.norm(Q)
+    if norm > 1e-12:
+        Q = Q / norm
+
+    return Q
+
+
+
+
+
 # ========== 椭圆点采样与法向量 ==========
 
 def get_ellipse_points_and_normals(center, axes, angle_deg, num_points=40):
@@ -124,6 +200,21 @@ def process_side(gray, prev_ellipse, num_samples, search_length, template):
 
 
 def main():
+
+
+
+    params = ours_params
+
+    K_L = params.K_left
+    D_L = params.D_left
+    K_R = params.K_right
+    D_R = params.D_right
+    R_LR = params.R
+    t_LR = params.T
+
+    print("使用相机参数：")
+    print(params)
+
     video_path = 'video/video_0000.avi'
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -197,6 +288,12 @@ def main():
         prev_ellipse_R, detected_pts_R = process_side( gray_R, prev_ellipse_R,
                                    NUM_SAMPLES, SEARCH_LENGTH, TEMPLATE)
 
+      
+        C_img_L = ellipse_to_conic(prev_ellipse_L)
+        C_img_R = ellipse_to_conic(prev_ellipse_R)
+
+        Q_L = conic_to_Q(C_img_L, K_L)
+        Q_R = conic_to_Q(C_img_R, K_R)  
 
         # 绘图
         display_L = left_half.copy()
