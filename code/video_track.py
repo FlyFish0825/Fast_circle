@@ -4,7 +4,311 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import time
 from StereoParams import ours_params
+import matplotlib.pyplot as plt
 
+
+
+
+
+'''
+求圆心
+'''
+def solve_projected_center_from_Q_and_normal(Q, n):
+    """
+    由 Q 和圆平面法向量 n 求真实圆心投影 q_c。
+
+    公式：
+        q_c ∼ Q^{-1} n
+
+    输入：
+        Q: 3x3 归一化椭圆矩阵
+        n: 3维法向量，当前相机坐标系下
+
+    输出：
+        q: [x, y, 1]，归一化相机坐标
+    """
+    Q = np.asarray(Q, dtype=np.float64)
+    Q = 0.5 * (Q + Q.T)
+
+    n = np.asarray(n, dtype=np.float64).reshape(3)
+
+    q = np.linalg.solve(Q, n)
+
+    if abs(q[2]) < 1e-12:
+        raise ValueError("圆心投影 q[2] 接近 0，无法归一化")
+
+    q = q / q[2]
+
+    return q
+
+def triangulate_center_from_normalized_points(qL, qR, R_LR, t_LR):
+    """
+    使用左右真实圆心投影 qL, qR 三角化三维圆心。
+
+    输入：
+        qL: 左图归一化圆心投影 [xL, yL, 1]
+        qR: 右图归一化圆心投影 [xR, yR, 1]
+        R_LR, t_LR: 双目外参，满足 X_R = R_LR X_L + t_LR
+
+    输出：
+        C_L: 左相机坐标系下的三维圆心 [X, Y, Z]
+        C_R: 右相机坐标系下的三维圆心
+        valid_depth: 是否满足左右相机正深度
+    """
+    qL = np.asarray(qL, dtype=np.float64).reshape(3)
+    qR = np.asarray(qR, dtype=np.float64).reshape(3)
+
+    R_LR = np.asarray(R_LR, dtype=np.float64).reshape(3, 3)
+    t_LR = np.asarray(t_LR, dtype=np.float64).reshape(3, 1)
+
+    # 左相机投影矩阵 P_L = [I | 0]
+    P_L = np.hstack([
+        np.eye(3, dtype=np.float64),
+        np.zeros((3, 1), dtype=np.float64)
+    ])
+
+    # 右相机投影矩阵 P_R = [R | t]
+    P_R = np.hstack([
+        R_LR,
+        t_LR
+    ])
+
+    xL, yL, _ = qL
+    xR, yR, _ = qR
+
+    A = np.zeros((4, 4), dtype=np.float64)
+
+    A[0, :] = xL * P_L[2, :] - P_L[0, :]
+    A[1, :] = yL * P_L[2, :] - P_L[1, :]
+    A[2, :] = xR * P_R[2, :] - P_R[0, :]
+    A[3, :] = yR * P_R[2, :] - P_R[1, :]
+
+    _, _, Vt = np.linalg.svd(A)
+
+    X_h = Vt[-1, :]
+
+    if abs(X_h[3]) < 1e-12:
+        raise ValueError("三角化结果 W 接近 0，无法归一化")
+
+    C_L = X_h[:3] / X_h[3]
+
+    C_R = R_LR @ C_L.reshape(3, 1) + t_LR
+    C_R = C_R.reshape(3)
+
+    valid_depth = (C_L[2] > 0) and (C_R[2] > 0)
+
+    return C_L, C_R, valid_depth
+'''
+把归一化圆心投影转成像素坐标，方便画图
+'''
+def normalized_to_pixel(q, K):
+    """
+    归一化坐标 [x, y, 1] -> 像素坐标 [u, v]
+    """
+    q = np.asarray(q, dtype=np.float64).reshape(3)
+    p = K @ q
+    p = p / p[2]
+    return p[:2]
+
+
+
+
+
+
+
+
+
+
+
+
+'''
+添加绘图函数
+'''
+def save_metric_plots(frame_ids, score_list, angle_list):
+    """
+    保存 score 和 angle_deg 曲线图
+    """
+    if len(frame_ids) == 0:
+        print("没有可绘制的数据")
+        return
+
+    # score 曲线
+    plt.figure(figsize=(10, 4))
+    plt.plot(frame_ids, score_list, label="score")
+    plt.axhline(0.99, linestyle="--", linewidth=1, label="score = 0.99")
+    plt.axhline(0.98, linestyle=":", linewidth=1, label="score = 0.98")
+    plt.xlabel("Frame")
+    plt.ylabel("score")
+    plt.title("Stereo Normal Matching Score")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("score_curve.png", dpi=200)
+    plt.close()
+
+    # angle_deg 曲线
+    plt.figure(figsize=(10, 4))
+    plt.plot(frame_ids, angle_list, label="angle_deg")
+    plt.axhline(3.0, linestyle="--", linewidth=1, label="3 deg")
+    plt.axhline(8.0, linestyle=":", linewidth=1, label="8 deg")
+    plt.xlabel("Frame")
+    plt.ylabel("angle_deg")
+    plt.title("Stereo Normal Matching Angle Error")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("angle_deg_curve.png", dpi=200)
+    plt.close()
+
+    print("已保存曲线图: score_curve.png, angle_deg_curve.png")
+
+
+'''
+双目消歧义
+'''
+def disambiguate_normals_by_stereo(normals_L, normals_R, R_LR):
+    """
+    利用双目旋转关系，从左右各两个法向量候选中选出一致的一组。
+
+    输入:
+        normals_L: [nL1, nL2]，左相机坐标系下的两个法向量候选
+        normals_R: [nR1, nR2]，右相机坐标系下的两个法向量候选
+        R_LR: 左相机到右相机的旋转矩阵，满足 X_R = R_LR X_L + t_LR
+
+    输出:
+        best_nL: 左相机下最终法向量
+        best_nR: 右相机下最终法向量，已经和 best_nL 方向对齐
+        best_info: 匹配信息
+    """
+    R_LR = np.asarray(R_LR, dtype=np.float64).reshape(3, 3)
+
+    best_score = -1.0
+    best_nL = None
+    best_nR = None
+    best_info = None
+
+    for i, nL in enumerate(normals_L):
+        nL = np.asarray(nL, dtype=np.float64).reshape(3)
+        nL = nL / np.linalg.norm(nL)
+
+        # 左相机法向量旋转到右相机坐标系
+        nL_to_R = R_LR @ nL
+        nL_to_R = nL_to_R / np.linalg.norm(nL_to_R)
+
+        for j, nR in enumerate(normals_R):
+            nR = np.asarray(nR, dtype=np.float64).reshape(3)
+            nR = nR / np.linalg.norm(nR)
+
+            dot = float(np.dot(nL_to_R, nR))
+
+            # 法向量正负都代表同一平面，所以用 abs
+            score = abs(dot)
+
+            if score > best_score:
+                best_score = score
+
+                # 如果 dot < 0，说明 nR 和 nL_to_R 方向相反，把 nR 翻转
+                if dot < 0:
+                    nR_aligned = -nR
+                else:
+                    nR_aligned = nR
+
+                best_nL = nL
+                best_nR = nR_aligned
+
+                best_info = {
+                    "idx_L": i,
+                    "idx_R": j,
+                    "dot_raw": dot,
+                    "score": score,
+                    "angle_deg": np.rad2deg(np.arccos(np.clip(score, -1.0, 1.0)))
+                }
+
+    return best_nL, best_nR, best_info
+
+
+
+'''
+求法向量候选
+'''
+def solve_normal_candidates_from_Q(Q):
+    """
+    由归一化椭圆锥矩阵 Q 求空间圆平面的两个法向量候选。
+
+    输入:
+        Q: 3x3 对称矩阵，满足 x.T @ Q @ x = 0
+
+    输出:
+        normals: 长度为 2 的 list
+                 [n1, n2]
+                 每个 n 是 3 维单位向量，位于当前相机坐标系下
+    """
+    Q = np.asarray(Q, dtype=np.float64)
+    Q = 0.5 * (Q + Q.T)
+
+    # 特征值分解，eigh 专门用于实对称矩阵
+    eigvals, eigvecs = np.linalg.eigh(Q)
+
+    # Q 是齐次矩阵，整体正负不影响椭圆。
+    # 正常圆锥矩阵应整理成两个正特征值、一个负特征值。
+    num_pos = np.sum(eigvals > 0)
+    num_neg = np.sum(eigvals < 0)
+
+    if num_pos == 1 and num_neg == 2:
+        Q = -Q
+        eigvals, eigvecs = np.linalg.eigh(Q)
+    elif num_pos != 2 or num_neg != 1:
+        raise ValueError(f"Q 特征值符号异常: {eigvals}")
+
+    # 重新排序，使 lambda1 >= lambda2 > 0 > lambda3
+    pos_idx = np.where(eigvals > 0)[0]
+    neg_idx = np.where(eigvals < 0)[0]
+
+    # 正特征值从大到小排序
+    pos_idx = pos_idx[np.argsort(eigvals[pos_idx])[::-1]]
+
+    idx1 = pos_idx[0]
+    idx2 = pos_idx[1]
+    idx3 = neg_idx[0]
+
+    lam1 = eigvals[idx1]
+    lam2 = eigvals[idx2]
+    lam3 = eigvals[idx3]
+
+    V = np.column_stack([
+        eigvecs[:, idx1],
+        eigvecs[:, idx2],
+        eigvecs[:, idx3]
+    ])
+
+    # 保证 V 是右手坐标系，避免后续符号混乱
+    if np.linalg.det(V) < 0:
+        V[:, 2] *= -1.0
+
+    den = lam1 - lam3
+    if abs(den) < 1e-12:
+        raise ValueError("特征值退化，无法稳定求法向量")
+
+    alpha2 = (lam1 - lam2) / den
+    beta2 = (lam2 - lam3) / den
+
+    # 数值保护，避免浮点误差导致 -1e-16 这种情况
+    alpha2 = max(alpha2, 0.0)
+    beta2 = max(beta2, 0.0)
+
+    alpha = np.sqrt(alpha2)
+    beta = np.sqrt(beta2)
+
+    n_bar_1 = np.array([ alpha, 0.0, beta], dtype=np.float64)
+    n_bar_2 = np.array([-alpha, 0.0, beta], dtype=np.float64)
+
+    n1 = V @ n_bar_1
+    n2 = V @ n_bar_2
+
+    n1 = n1 / np.linalg.norm(n1)
+    n2 = n2 / np.linalg.norm(n2)
+
+    return [n1, n2]
 
 
 
@@ -263,6 +567,12 @@ def main():
     executor = ThreadPoolExecutor(max_workers=2)
     t = time.perf_counter() # um
     frame_idx = 1
+
+
+    metric_frame_ids = []
+    metric_scores = []
+    metric_angles = []  
+    center_history = []  
     while True:
         
         ret, frame = cap.read()
@@ -295,8 +605,67 @@ def main():
         Q_L = conic_to_Q(C_img_L, K_L)
         Q_R = conic_to_Q(C_img_R, K_R)  
 
-        # 绘图
+        normal_candidates_L = solve_normal_candidates_from_Q(Q_L)
+        normal_candidates_R = solve_normal_candidates_from_Q(Q_R)
+
+        nL1, nL2 = normal_candidates_L
+        nR1, nR2 = normal_candidates_R
+
+        best_nL, best_nR, normal_match_info = disambiguate_normals_by_stereo(
+            normal_candidates_L,
+            normal_candidates_R,
+            R_LR
+        )
+        score = normal_match_info["score"]
+        angle = normal_match_info["angle_deg"]
+
+        valid_normal = (score > 0.99) and (angle < 8.0)
+
+        if not valid_normal:
+            print(f"帧 {frame_idx}: 法向量不稳定，跳过三角化, score={score:.4f}, angle={angle:.2f}")
+            continue
+
+        try:
+            qL_center = solve_projected_center_from_Q_and_normal(Q_L, best_nL)
+            qR_center = solve_projected_center_from_Q_and_normal(Q_R, best_nR)
+
+            C_L, C_R, valid_depth = triangulate_center_from_normalized_points(
+                qL_center,
+                qR_center,
+                R_LR,
+                t_LR
+            )
+            
+            if not valid_depth:
+                print(f"帧 {frame_idx}: 三角化圆心不满足正深度, C_L={C_L}, C_R={C_R}")
+                continue
+            center_history.append([frame_idx, C_L[0], C_L[1], C_L[2], score, angle])        
+            pL_center = normalized_to_pixel(qL_center, K_L)
+            pR_center = normalized_to_pixel(qR_center, K_R)
+
+        except Exception as e:
+            print(f"帧 {frame_idx}: 圆心三角化失败: {e}")
+            continue
+
+        metric_frame_ids.append(frame_idx)
+        metric_scores.append(normal_match_info["score"])
+        metric_angles.append(normal_match_info["angle_deg"])
+
+    
+
+                # 绘图
         display_L = left_half.copy()
+        display_R = right_half.copy()
+
+        if pL_center is not None:
+            cv2.circle(display_L, (int(pL_center[0]), int(pL_center[1])), 6, (255, 0, 0), -1)
+            cv2.putText(display_L, "center", (int(pL_center[0]) + 8, int(pL_center[1])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+        if pR_center is not None:
+            cv2.circle(display_R, (int(pR_center[0]), int(pR_center[1])), 6, (255, 0, 0), -1)
+            cv2.putText(display_R, "center", (int(pR_center[0]) + 8, int(pR_center[1])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
         for (x, y) in detected_pts_L:
             cv2.circle(display_L, (int(x), int(y)), 2, (0, 0, 255), -1)
         cv2.ellipse(display_L, prev_ellipse_L, (0, 255, 0), 2)
@@ -319,7 +688,7 @@ def main():
             t = time.perf_counter() # um
             
             print(f"帧 {frame_idx}/{total_frames}, 左点: {len(detected_pts_L)}, 右点: {len(detected_pts_R)}, 估计 FPS: {fps:.2f}")
-
+    save_metric_plots(metric_frame_ids, metric_scores, metric_angles)
     cap.release()
     out.release()
     cv2.destroyAllWindows()
