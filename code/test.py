@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import time
+
 
 def get_ellipse_points_and_normals(center, axes, angle_deg, num_points=40):
     """
@@ -27,45 +29,80 @@ def get_ellipse_points_and_normals(center, axes, angle_deg, num_points=40):
     
     return np.column_stack((x, y)), np.column_stack((nx, ny))
 
-def search_along_normal(img_gray, pt, normal, search_length, template):
+
+def search_along_normals(img_gray, pts, normals, distances, template_kernel, valid_kernel):
     """
-    沿着单点的法线方向提取一维像素，并使用模板进行卷积寻找边缘
+    同时沿着多个法线方向提取一维像素，并使用模板进行卷积寻找边缘
     """
     h, w = img_gray.shape
-    x0, y0 = pt
-    nx, ny = normal
     
-    # 沿着法线生成采样点坐标 (向内和向外延伸)
-    distances = np.arange(-search_length, search_length + 1)
-    sample_x = x0 + distances * nx
-    sample_y = y0 + distances * ny
+    # 同时生成所有法线上的采样点坐标
+    sample_x = pts[:, 0, None] + distances[None, :] * normals[:, 0, None]
+    sample_y = pts[:, 1, None] + distances[None, :] * normals[:, 1, None]
     
-    # 过滤掉超出图像边界的点
-    valid_mask = (sample_x >= 0) & (sample_x < w-1) & (sample_y >= 0) & (sample_y < h-1)
-    if not np.any(valid_mask):
-        return None, 0
-        
-    v_x, v_y = sample_x[valid_mask], sample_y[valid_mask]
+    # 标记超出图像边界的采样点
+    valid_mask = (
+        (sample_x >= 0)
+        & (sample_x < w-1)
+        & (sample_y >= 0)
+        & (sample_y < h-1)
+    ).astype(np.uint8)
     
-    # 获取亚像素灰度值
-    pixel_values = img_gray[v_y.astype(int), v_x.astype(int)].astype(float)
+    # 同时获取所有法线上的灰度值
+    pixel_values = cv2.remap(
+        img_gray,
+        sample_x,
+        sample_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0
+    )
     
-    if len(pixel_values) < len(template):
-        return None, 0
-        
-    # 执行一维卷积 (寻找互相关峰值)
-    response = np.convolve(pixel_values, template, mode='valid')
+    # 同时对所有法线执行一维卷积
+    response = cv2.filter2D(
+        pixel_values,
+        cv2.CV_32F,
+        template_kernel,
+        borderType=cv2.BORDER_CONSTANT
+    )
     
-    # 寻找绝对响应最大的索引 (代表最强烈的灰度突变)
-    max_idx = np.argmax(np.abs(response))
-    max_response = np.abs(response[max_idx])
+    # 计算每个卷积位置中有效像素的数量
+    valid_count = cv2.filter2D(
+        valid_mask,
+        cv2.CV_32F,
+        valid_kernel,
+        borderType=cv2.BORDER_CONSTANT
+    )
+    
+    template_length = template_kernel.shape[1]
+    
+    # 只有模板覆盖范围内所有像素都有效，该卷积结果才有效
+    valid_response = valid_count >= template_length - 0.5
+    
+    # 寻找绝对响应最大的索引
+    abs_response = np.abs(response)
+    abs_response[~valid_response] = -np.inf
+    
+    # 判断每条法线是否存在有效卷积位置
+    line_valid = np.any(valid_response, axis=1)
+    
+    max_idx = np.argmax(abs_response, axis=1)
+    row_idx = np.arange(len(pts))
+    max_response = abs_response[row_idx, max_idx]
     
     # 映射回图像坐标
-    offset_idx = max_idx + len(template) // 2
-    best_x = v_x[offset_idx]
-    best_y = v_y[offset_idx]
+    best_distance = distances[max_idx]
+    best_x = pts[:, 0] + best_distance * normals[:, 0]
+    best_y = pts[:, 1] + best_distance * normals[:, 1]
     
-    return (best_x, best_y), max_response
+    best_points = np.column_stack((best_x, best_y))
+    
+    # 删除没有有效卷积区域的法线
+    best_points = best_points[line_valid]
+    max_response = max_response[line_valid]
+    
+    return best_points, max_response
+
 
 def main():
     # 1. 加载真实图像
@@ -86,25 +123,59 @@ def main():
     # 你提供的长短轴 716.6 和 750.4 是全长，生成函数需要半轴长 (a, b)
     prior_axes = (750 / 2, 800 / 2) 
     prior_angle = 12
+
     
     # 3. 算法参数
     NUM_SAMPLES = 100           # 采样点数量
     SEARCH_LENGTH = 100       # 法向搜索距离 (原图分辨率较高，建议增大搜索范围以防先验误差)
-    TEMPLATE = np.array([-1, -2, -4, -2, -1, 0, 1, 2, 4, 2, 1]) # 改进了阶跃模板的平滑度，提高抗悬浮物干扰能力
+    TEMPLATE = np.array(
+        [-1, -2, -4, -2, -1, 0, 1, 2, 4, 2, 1],
+        dtype=np.float32
+    ) # 改进了阶跃模板的平滑度，提高抗悬浮物干扰能力
     RESPONSE_THRESH = 0       # 卷积响应阈值
+    
+    # 固定数组只计算一次
+    DISTANCES = np.arange(
+        -SEARCH_LENGTH,
+        SEARCH_LENGTH + 1,
+        dtype=np.float32
+    )
+    
+    # cv2.filter2D执行的是相关运算，因此提前翻转模板
+    TEMPLATE_KERNEL = TEMPLATE[::-1].reshape(1, -1).copy()
+    
+    # 用于判断卷积窗口中的像素是否全部有效
+    VALID_KERNEL = np.ones(
+        (1, len(TEMPLATE)),
+        dtype=np.float32
+    )
+
+    start_time = time.perf_counter()
     
     # 4. 获取先验椭圆上的点和法线
     pts, normals = get_ellipse_points_and_normals(prior_center, prior_axes, prior_angle, NUM_SAMPLES)
     
-    detected_points = []
+    pts = pts.astype(np.float32)
+    normals = normals.astype(np.float32)
     
-    # 5. 执行法向一维搜索
-    for pt, normal in zip(pts, normals):
-        best_pt, score = search_along_normal(img_gray, pt, normal, SEARCH_LENGTH, TEMPLATE)
-        if best_pt is not None and score > RESPONSE_THRESH:
-            detected_points.append(best_pt)
+    # 5. 同时执行所有法线的一维搜索
+    detected_points, scores = search_along_normals(
+        img_gray,
+        pts,
+        normals,
+        DISTANCES,
+        TEMPLATE_KERNEL,
+        VALID_KERNEL
+    )
+    
+    detected_points = detected_points[
+        scores > RESPONSE_THRESH
+    ]
             
     detected_points = np.array(detected_points, dtype=np.float32)
+    
+    end_time = time.perf_counter()
+    print(f"耗时: {end_time - start_time:.4f} 秒")
     
     # 6. 拟合最终的椭圆
     if len(detected_points) >= 5:
