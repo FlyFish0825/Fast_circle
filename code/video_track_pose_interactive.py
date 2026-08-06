@@ -12,7 +12,7 @@ VIDEO_CANDIDATES = [
     SCRIPT_DIR.parent / "video" / "video_0000.avi",
 ]
 
-NUM_SAMPLES = 50
+NUM_SAMPLES = 100
 SEARCH_LENGTH = 50
 EDGE_TEMPLATE = np.array([-1, -2, -4, -8, -16, 0, 16, 8, 4, 2, 1], dtype=np.float64)
 
